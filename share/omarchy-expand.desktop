@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Text Expander
+Comment=Set up omarchy-expand combos
+Keywords=snippet;expand;combo;text;omarchy-expand;
+Exec=omarchy-launch-tui --app-id=TUI.float /usr/bin/omarchy-expand
+Icon=accessories-text-editor
+Terminal=false
