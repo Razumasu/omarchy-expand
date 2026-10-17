@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the guest end-to-end tests; source from a test script.
 # Targets are foot terminals that save the first line typed into them.
 

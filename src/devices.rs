@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -18,6 +19,9 @@ use crate::injector::VIRTUAL_DEVICE_NAME;
 const INPUT_DIR: &str = "/dev/input";
 
 type OpenDevices = Arc<Mutex<HashSet<PathBuf>>>;
+
+/// Numbers each opened device, so held keys can be released when a device disappears.
+static NEXT_DEVICE: AtomicUsize = AtomicUsize::new(1);
 
 pub fn watch(events: Sender<Event>) -> io::Result<()> {
     let open_devices = OpenDevices::default();
@@ -67,12 +71,14 @@ fn try_open(path: &Path, open_devices: &OpenDevices, events: &Sender<Event>) {
         device.name().unwrap_or("unnamed device")
     );
 
+    let id = NEXT_DEVICE.fetch_add(1, Ordering::Relaxed);
     let path = path.to_owned();
     let open_devices = Arc::clone(open_devices);
     let events = events.clone();
     thread::spawn(move || {
-        forward_events(device, &events);
+        forward_events(id, device, &events);
         open_devices.lock().unwrap().remove(&path);
+        events.send(Event::DeviceLost { device: id }).ok();
     });
 }
 
@@ -84,7 +90,7 @@ fn is_keyboard_or_mouse(device: &Device) -> bool {
 }
 
 /// Returns when the device disappears or the daemon stops listening.
-fn forward_events(mut device: Device, events: &Sender<Event>) {
+fn forward_events(id: usize, mut device: Device, events: &Sender<Event>) {
     while let Ok(input_events) = device.fetch_events() {
         for input_event in input_events {
             let EventSummary::Key(_, key, value) = input_event.destructure() else {
@@ -95,7 +101,11 @@ fn forward_events(mut device: Device, events: &Sender<Event>) {
                     Event::Click
                 }
                 // Codes below the first button are keyboard keys.
-                key if key.0 < KeyCode::BTN_0.0 => Event::Key { code: key.0, value },
+                key if key.0 < KeyCode::BTN_0.0 => Event::Key {
+                    device: id,
+                    code: key.0,
+                    value,
+                },
                 _ => continue,
             };
             if events.send(event).is_err() {

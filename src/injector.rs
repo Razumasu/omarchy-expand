@@ -1,10 +1,10 @@
 //! Replaces a typed keyword with its snippet: erase with backspaces, paste through the
 //! clipboard (instant for long text, any Unicode), then give the user their clipboard back.
 
-use std::io::{self, Write};
-use std::process::{Command, Stdio};
+use std::io::{self, Read, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, EventType, InputEvent, KeyCode};
@@ -13,6 +13,10 @@ pub const VIRTUAL_DEVICE_NAME: &str = "omarchy-expand virtual keyboard";
 
 /// How long the focused app gets to read the pasted snippet before the clipboard is restored.
 const PASTE_SETTLE_TIME: Duration = Duration::from_millis(250);
+
+/// How long the current clipboard owner gets to hand over its text. A hung owner (some
+/// apps never answer) must not stall the daemon, so after this the clipboard counts as empty.
+const CLIPBOARD_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Terminals paste with Ctrl+Shift+V because Ctrl+V is a control character to them.
 /// Matched by class, or by process for terminals running an app under its own class.
@@ -96,16 +100,42 @@ fn key_event(key: KeyCode, value: i32) -> InputEvent {
 }
 
 /// Only text is preserved for now; an image on the clipboard is not restored.
+/// Gives up after CLIPBOARD_READ_TIMEOUT, killing wl-paste, if the owner does not answer.
 fn read_clipboard() -> Option<String> {
-    let output = Command::new("wl-paste")
+    let mut child = Command::new("wl-paste")
         .args(["--no-newline", "--type", "text"])
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .ok()?;
-    output
-        .status
+    // Drained on its own thread, so a large clipboard cannot block the child on a full pipe.
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut text = Vec::new();
+        stdout.read_to_end(&mut text).ok();
+        text
+    });
+    let status = wait_with_timeout(&mut child, CLIPBOARD_READ_TIMEOUT);
+    let text = reader.join().ok()?;
+    status?
         .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .then(|| String::from_utf8_lossy(&text).into_owned())
+}
+
+/// Waits for the child, or kills it once the timeout passes and returns None.
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill().ok();
+            child.wait().ok();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn write_clipboard(text: &str) -> io::Result<()> {
@@ -129,7 +159,7 @@ fn clear_clipboard() -> io::Result<()> {
     )
 }
 
-fn check_status(command: &str, status: std::process::ExitStatus) -> io::Result<()> {
+fn check_status(command: &str, status: ExitStatus) -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {

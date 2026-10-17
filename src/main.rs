@@ -1,5 +1,6 @@
 mod config;
 mod devices;
+mod expander;
 mod hyprland;
 mod injector;
 mod ipc;
@@ -8,9 +9,9 @@ mod pick;
 mod tui;
 mod typed;
 
-use std::collections::HashSet;
 use std::env;
 use std::error::Error;
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
@@ -19,23 +20,34 @@ use std::time::Duration;
 use evdev::KeyCode;
 
 use config::Config;
+use expander::{Expander, Expansion};
+use hyprland::ActiveWindow;
 use injector::Injector;
 use keymap::Keyboard;
-use typed::{Combo, TypedText};
 
 /// The Omarchy menu's layer; the picker's paste waits for it to close.
 const MENU_LAYER: &str = "omarchy-menu";
+
+/// How long a daemon started at login waits for Hyprland's socket to answer.
+const HYPRLAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Everything the daemon reacts to, from all listener threads.
 #[derive(Debug)]
 pub enum Event {
     /// value is 1 for press, 2 for autorepeat, 0 for release.
     Key {
+        device: usize,
         code: u16,
         value: i32,
     },
+    /// The device was unplugged; any keys it still had down will never be released.
+    DeviceLost {
+        device: usize,
+    },
     Click,
     FocusChanged,
+    /// A keyboard switched to another of its configured layouts.
+    LayoutChanged,
     ConfigChanged,
     HyprlandLost,
     /// The picker chose a combo; the result goes back to it.
@@ -73,8 +85,10 @@ fn run_daemon() -> Result<(), Box<dyn Error>> {
     let (sender, events) = mpsc::channel();
     ipc::listen(sender.clone())?;
 
-    let mut keyboard = Keyboard::new(&hyprland::main_keyboard_names()?)?;
-    let mut injector = Injector::new(keyboard.paste_key().unwrap_or(KeyCode::KEY_V.0))?;
+    hyprland::wait_until_reachable(HYPRLAND_STARTUP_TIMEOUT)?;
+    let mut names = hyprland::main_keyboard_names()?;
+    let mut keyboard = Keyboard::new(&names)?;
+    let mut injector = Injector::new(paste_key(&keyboard))?;
     let config_dir = config::config_dir()?;
 
     // Listen before loading so a change made in between is not missed.
@@ -84,49 +98,65 @@ fn run_daemon() -> Result<(), Box<dyn Error>> {
 
     let mut config = load_config(&config_dir).unwrap_or_default();
     let mut focus_excluded = focused_window_excluded(&config);
-    let mut typed = TypedText::default();
-    let mut held_keys = HashSet::new();
-    let mut pending: Option<Combo> = None;
+    let mut expander = Expander::default();
 
     for event in events {
         match event {
-            Event::Key { code, value } => {
-                if value != 0 && pending.is_none() && !focus_excluded {
-                    record_keystroke(&keyboard, &mut typed, code);
-                    pending = typed.find_match(&config.combos).cloned();
-                }
-                match value {
-                    1 => {
-                        held_keys.insert(code);
-                        keyboard.update_key(code, true);
-                    }
-                    0 => {
-                        held_keys.remove(&code);
-                        keyboard.update_key(code, false);
-                    }
-                    _ => {}
-                }
-                // A held Shift would turn our Ctrl+V into Ctrl+Shift+V, so wait for a clean keyboard.
-                if held_keys.is_empty()
-                    && let Some(combo) = pending.take()
-                {
-                    expand(&mut injector, &combo, &config);
-                    typed.clear();
+            Event::Key {
+                device,
+                code,
+                value,
+            } => {
+                let due = expander.key(
+                    &mut keyboard,
+                    &config.combos,
+                    focus_excluded,
+                    device,
+                    code,
+                    value,
+                );
+                if let Some(expansion) = due {
+                    expand(&mut injector, &expansion, &config);
                 }
             }
-            Event::Click => typed.clear(),
+            Event::DeviceLost { device } => expander.device_lost(&mut keyboard, device),
+            Event::Click => expander.reset(),
             Event::FocusChanged => {
-                typed.clear();
-                pending = None;
+                expander.reset();
                 focus_excluded = focused_window_excluded(&config);
+            }
+            Event::LayoutChanged => {
+                expander.reset();
+                match hyprland::main_keyboard_names() {
+                    Ok(changed) if changed != names => match Keyboard::new(&changed) {
+                        Ok(mut rebuilt) => {
+                            for code in expander.held_codes() {
+                                rebuilt.update_key(code, true);
+                            }
+                            keyboard = rebuilt;
+                            names = changed;
+                            eprintln!(
+                                "omarchy-expand: following keyboard layout {} of {:?}",
+                                names.active_layout + 1,
+                                names.layout
+                            );
+                        }
+                        Err(error) => {
+                            eprintln!("omarchy-expand: keeping the previous keymap: {error}");
+                        }
+                    },
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("omarchy-expand: cannot read the new keyboard layout: {error}");
+                    }
+                }
             }
             Event::ConfigChanged => {
                 if let Some(reloaded) = load_config(&config_dir) {
                     config = reloaded;
                     focus_excluded = focused_window_excluded(&config);
                 }
-                typed.clear();
-                pending = None;
+                expander.reset();
             }
             Event::HyprlandLost => return Err("lost the connection to Hyprland".into()),
             Event::Paste { keyword, reply } => {
@@ -136,11 +166,29 @@ fn run_daemon() -> Result<(), Box<dyn Error>> {
                 }
                 // The picker may have given up waiting; the paste happened either way.
                 reply.send(result).ok();
-                typed.clear();
+                expander.reset();
             }
         }
     }
     Err("the input listener stopped".into())
+}
+
+/// The key that types "v" on the layout Hyprland gives the virtual keyboard. That is the
+/// global input layout, not a per-device override on the main keyboard, so it is read
+/// separately; the main keyboard's layout is the fallback.
+fn paste_key(main_keyboard: &Keyboard) -> u16 {
+    let global = hyprland::global_keyboard_names()
+        .and_then(|names| Keyboard::new(&names).map_err(io::Error::other));
+    let key = match global {
+        Ok(keyboard) => keyboard.paste_key(),
+        Err(error) => {
+            eprintln!(
+                "omarchy-expand: cannot read the global keyboard layout, using the main keyboard's: {error}"
+            );
+            main_keyboard.paste_key()
+        }
+    };
+    key.unwrap_or(KeyCode::KEY_V.0)
 }
 
 /// An invalid file is reported and skipped, so a typo never stops a running daemon.
@@ -160,12 +208,18 @@ fn load_config(dir: &Path) -> Option<Config> {
 /// Fails closed: if Hyprland cannot say what has focus, nothing is recorded.
 fn focused_window_excluded(config: &Config) -> bool {
     match hyprland::active_window() {
-        Ok(window) => config.excludes(&window.class, window.process_name().as_deref()),
+        Ok(window) => window_excluded(config, &window),
         Err(error) => {
             eprintln!("omarchy-expand: cannot read the focused window: {error}");
             true
         }
     }
+}
+
+/// A focused layer surface (the launcher, a menu, the lock screen) has no window class,
+/// so it could never be excluded by name; nothing is recorded or expanded there.
+fn window_excluded(config: &Config, window: &ActiveWindow) -> bool {
+    window.class.is_empty() || config.excludes(&window.class, window.process_name().as_deref())
 }
 
 /// A combo chosen in the picker. It was picked on purpose, so excluded apps do not apply.
@@ -184,7 +238,7 @@ fn paste_picked(injector: &mut Injector, config: &Config, keyword: &str) -> Resu
         .map_err(|error| error.to_string())
 }
 
-fn expand(injector: &mut Injector, combo: &Combo, config: &Config) {
+fn expand(injector: &mut Injector, expansion: &Expansion, config: &Config) {
     let window = match hyprland::active_window() {
         Ok(window) => window,
         Err(error) => {
@@ -192,8 +246,7 @@ fn expand(injector: &mut Injector, combo: &Combo, config: &Config) {
             return;
         }
     };
-    let process_name = window.process_name();
-    if config.excludes(&window.class, process_name.as_deref()) {
+    if window_excluded(config, &window) {
         return;
     }
     match hyprland::session_locked() {
@@ -204,32 +257,8 @@ fn expand(injector: &mut Injector, combo: &Combo, config: &Config) {
             return;
         }
     }
-    let into_terminal = injector::is_terminal(&window.class, process_name.as_deref());
-    let erase = combo.keyword.chars().count();
-    if let Err(error) = injector.expand(erase, &combo.snippet, into_terminal) {
+    let into_terminal = injector::is_terminal(&window.class, window.process_name().as_deref());
+    if let Err(error) = injector.expand(expansion.erase, &expansion.text, into_terminal) {
         eprintln!("omarchy-expand: expansion failed: {error}");
-    }
-}
-
-/// Printable characters extend the typed run; anything else (space, Enter, arrows,
-/// shortcuts) breaks it, as in Beeftext.
-fn record_keystroke(keyboard: &Keyboard, typed: &mut TypedText, code: u16) {
-    if code == KeyCode::KEY_BACKSPACE.0 {
-        typed.backspace();
-        return;
-    }
-    if keyboard.shortcut_modifier_active() {
-        typed.clear();
-        return;
-    }
-    let keysym = keyboard.keysym(code);
-    if keymap::is_modifier(keysym) || keymap::is_dead_key(keysym) {
-        return;
-    }
-    let text = keyboard.text(code);
-    if !text.is_empty() && !text.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        typed.push(&text);
-    } else {
-        typed.clear();
     }
 }

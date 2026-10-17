@@ -1,0 +1,3 @@
+# cleanup() functions are invoked through `trap cleanup EXIT` and menu_closed() through
+# wait_for, which shellcheck cannot see; the "never invoked" note is noise here.
+disable=SC2329

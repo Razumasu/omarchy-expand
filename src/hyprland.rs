@@ -13,6 +13,25 @@ use serde_json::Value;
 use crate::Event;
 use crate::keymap::KeymapNames;
 
+/// Keeps trying Hyprland's socket until it answers, for a daemon started at login before
+/// the compositor is ready. Missing environment is reported at once; it will not appear.
+pub fn wait_until_reachable(timeout: Duration) -> io::Result<()> {
+    socket_dir()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match request_json("version") {
+            Ok(_) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(io::Error::other(format!(
+                    "Hyprland did not answer within {} seconds: {error}",
+                    timeout.as_secs()
+                )));
+            }
+            Err(_) => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
 /// The keymap of the keyboard Hyprland marks as main, including per-device overrides.
 pub fn main_keyboard_names() -> io::Result<KeymapNames> {
     let devices = request_json("devices")?;
@@ -33,6 +52,29 @@ pub fn main_keyboard_names() -> io::Result<KeymapNames> {
     })
 }
 
+/// The keymap Hyprland gives a keyboard it has no per-device rule for, such as the
+/// daemon's virtual keyboard: the global input settings, starting on the first layout.
+pub fn global_keyboard_names() -> io::Result<KeymapNames> {
+    let option = |name: &str| -> io::Result<String> {
+        let value = request_json(&format!("getoption input:kb_{name}"))?;
+        Ok(value["str"].as_str().unwrap_or_default().to_owned())
+    };
+    let names = KeymapNames {
+        rules: option("rules")?,
+        model: option("model")?,
+        layout: option("layout")?,
+        variant: option("variant")?,
+        options: option("options")?,
+        active_layout: 0,
+    };
+    // Hyprland's default is "us", so an empty answer means the option was not understood;
+    // compiling xkb's own default instead could pick the wrong paste key silently.
+    if names.layout.is_empty() {
+        return Err(io::Error::other("Hyprland did not report input:kb_layout"));
+    }
+    Ok(names)
+}
+
 #[derive(Debug, Default)]
 pub struct ActiveWindow {
     pub class: String,
@@ -47,7 +89,8 @@ impl ActiveWindow {
     }
 }
 
-/// The focused window, or an empty one when nothing has focus.
+/// The focused window, or an empty one when no window has focus (a layer surface such as
+/// the launcher or the lock screen may hold the keyboard instead).
 pub fn active_window() -> io::Result<ActiveWindow> {
     let window = request_json("activewindow")?;
     Ok(ActiveWindow {
@@ -58,18 +101,26 @@ pub fn active_window() -> io::Result<ActiveWindow> {
 
 /// Hyprland has no lock flag, but a held session lock shows up as LOCK in a monitor's
 /// solitaryBlockedBy. omarchy-hyprland-session-locked relies on the same signal.
+/// If no monitor reports that field at all, the state is unknown and that is an error,
+/// so a renamed field in a future Hyprland stops expansions rather than unlocking them.
 pub fn session_locked() -> io::Result<bool> {
-    Ok(monitors_show_lock(&request_json("monitors")?))
+    lock_state(&request_json("monitors")?).ok_or_else(|| {
+        io::Error::other(
+            "Hyprland did not report a session lock state (no monitor lists solitaryBlockedBy)",
+        )
+    })
 }
 
-fn monitors_show_lock(monitors: &Value) -> bool {
-    monitors.as_array().is_some_and(|monitors| {
-        monitors.iter().any(|monitor| {
-            monitor["solitaryBlockedBy"]
-                .as_array()
-                .is_some_and(|reasons| reasons.iter().any(|reason| reason == "LOCK"))
-        })
-    })
+fn lock_state(monitors: &Value) -> Option<bool> {
+    let mut reported = false;
+    let mut locked = false;
+    for monitor in monitors.as_array()? {
+        if let Some(reasons) = monitor["solitaryBlockedBy"].as_array() {
+            reported = true;
+            locked |= reasons.iter().any(|reason| reason == "LOCK");
+        }
+    }
+    reported.then_some(locked)
 }
 
 /// Waits until no layer surface with this namespace is mapped, so keyboard focus is back
@@ -97,8 +148,8 @@ fn has_layer(value: &Value, namespace: &str) -> bool {
     }
 }
 
-/// Sends FocusChanged whenever another window gets focus, and HyprlandLost if the
-/// event stream ends.
+/// Sends FocusChanged whenever another window gets focus, LayoutChanged when a keyboard
+/// switches layout, and HyprlandLost if the event stream ends.
 pub fn watch_focus(events: Sender<Event>) -> io::Result<()> {
     let stream = UnixStream::connect(socket_dir()?.join(".socket2.sock"))?;
     thread::spawn(move || {
@@ -109,7 +160,16 @@ pub fn watch_focus(events: Sender<Event>) -> io::Result<()> {
             .read_until(b'\n', &mut line)
             .is_ok_and(|read| read > 0)
         {
-            if line.starts_with(b"activewindowv2>>") && events.send(Event::FocusChanged).is_err() {
+            let event = if line.starts_with(b"activewindowv2>>") {
+                Some(Event::FocusChanged)
+            } else if line.starts_with(b"activelayout>>") {
+                Some(Event::LayoutChanged)
+            } else {
+                None
+            };
+            if let Some(event) = event
+                && events.send(event).is_err()
+            {
                 return;
             }
             line.clear();
@@ -165,11 +225,18 @@ mod tests {
             { "name": "DP-1", "solitaryBlockedBy": ["WINDOWS"] },
             { "name": "DP-2", "solitaryBlockedBy": ["LOCK", "WINDOWS"] }
         ]);
-        let unlocked = serde_json::json!([{ "name": "DP-1", "solitaryBlockedBy": ["WINDOWS"] }]);
-        assert!(monitors_show_lock(&locked));
-        assert!(!monitors_show_lock(&unlocked));
-        assert!(!monitors_show_lock(
-            &serde_json::json!([{ "name": "DP-1" }])
-        ));
+        let unlocked = serde_json::json!([
+            { "name": "DP-1", "solitaryBlockedBy": ["WINDOWS"] },
+            { "name": "DP-2", "solitaryBlockedBy": [] }
+        ]);
+        assert_eq!(lock_state(&locked), Some(true));
+        assert_eq!(lock_state(&unlocked), Some(false));
+    }
+
+    #[test]
+    fn a_missing_lock_signal_is_unknown_not_unlocked() {
+        assert_eq!(lock_state(&serde_json::json!([{ "name": "DP-1" }])), None);
+        assert_eq!(lock_state(&serde_json::json!([])), None);
+        assert_eq!(lock_state(&serde_json::json!({})), None);
     }
 }

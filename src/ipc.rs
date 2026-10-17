@@ -12,11 +12,16 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
+use std::time::Duration;
 
 use crate::Event;
 
 /// Longer lines are not requests the picker would send.
 const MAX_REQUEST_BYTES: u64 = 4096;
+
+/// The daemon waits up to two seconds for the menu to close and then pastes, so a reply
+/// taking longer than this means the daemon is stuck; the picker must not hang with it.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn socket_path() -> io::Result<PathBuf> {
     env::var_os("XDG_RUNTIME_DIR")
@@ -95,12 +100,21 @@ pub fn request_paste(keyword: &str) -> Result<(), String> {
     let mut stream = UnixStream::connect(&path)
         .map_err(|_| "the omarchy-expand daemon is not running".to_owned())?;
     stream
+        .set_read_timeout(Some(REPLY_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    stream
         .write_all(format!("paste {keyword}\n").as_bytes())
         .map_err(|error| error.to_string())?;
     let mut response = String::new();
     BufReader::new(stream)
         .read_line(&mut response)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => format!(
+                "the daemon did not answer within {} seconds",
+                REPLY_TIMEOUT.as_secs()
+            ),
+            _ => error.to_string(),
+        })?;
     match response.trim_end() {
         "ok" => Ok(()),
         other => Err(other.strip_prefix("error ").unwrap_or(other).to_owned()),

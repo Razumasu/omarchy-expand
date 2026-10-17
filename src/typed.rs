@@ -14,11 +14,22 @@ pub enum Matching {
     Loose,
 }
 
+/// When a matching keyword is replaced: as soon as it has been typed, or only once a
+/// space or punctuation mark follows it, so "sig" can be typed inside "signal".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trigger {
+    #[default]
+    Immediate,
+    Delimiter,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Combo {
     pub keyword: String,
     pub snippet: String,
     pub matching: Matching,
+    pub trigger: Trigger,
     pub case_sensitive: bool,
 }
 
@@ -49,11 +60,16 @@ impl TypedText {
         self.text.clear();
     }
 
-    /// The longest matching keyword wins, so "sig" and "sigh" can coexist as loose combos.
-    pub fn find_match<'a>(&self, combos: &'a [Combo]) -> Option<&'a Combo> {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The combo with this trigger that the typed run matches. The longest keyword
+    /// wins, so "sig" and "sigh" can coexist as loose combos.
+    pub fn find_match<'a>(&self, combos: &'a [Combo], trigger: Trigger) -> Option<&'a Combo> {
         combos
             .iter()
-            .filter(|combo| self.matches(combo))
+            .filter(|combo| combo.trigger == trigger && self.matches(combo))
             .max_by_key(|combo| combo.keyword.chars().count())
     }
 
@@ -83,6 +99,7 @@ mod tests {
             keyword: keyword.into(),
             snippet: format!("<{keyword}>"),
             matching,
+            trigger: Trigger::Immediate,
             case_sensitive: true,
         }
     }
@@ -96,25 +113,45 @@ mod tests {
     #[test]
     fn strict_needs_the_whole_run_to_be_the_keyword() {
         let combos = [combo("==>", Matching::Strict)];
-        assert!(typed("==>").find_match(&combos).is_some());
-        assert!(typed("First==>").find_match(&combos).is_none());
+        assert!(
+            typed("==>")
+                .find_match(&combos, Trigger::Immediate)
+                .is_some()
+        );
+        assert!(
+            typed("First==>")
+                .find_match(&combos, Trigger::Immediate)
+                .is_none()
+        );
     }
 
     #[test]
     fn loose_matches_at_the_end_of_a_word() {
         let combos = [combo("==>", Matching::Loose)];
-        assert!(typed("First==>").find_match(&combos).is_some());
-        assert!(typed("First==>x").find_match(&combos).is_none());
+        assert!(
+            typed("First==>")
+                .find_match(&combos, Trigger::Immediate)
+                .is_some()
+        );
+        assert!(
+            typed("First==>x")
+                .find_match(&combos, Trigger::Immediate)
+                .is_none()
+        );
     }
 
     #[test]
     fn case_insensitive_combos_ignore_case_on_both_sides() {
         let mut insensitive = combo("Sig", Matching::Strict);
         insensitive.case_sensitive = false;
-        assert!(typed("sIG").find_match(&[insensitive]).is_some());
         assert!(
             typed("sIG")
-                .find_match(&[combo("Sig", Matching::Strict)])
+                .find_match(&[insensitive], Trigger::Immediate)
+                .is_some()
+        );
+        assert!(
+            typed("sIG")
+                .find_match(&[combo("Sig", Matching::Strict)], Trigger::Immediate)
                 .is_none()
         );
     }
@@ -122,7 +159,30 @@ mod tests {
     #[test]
     fn longest_keyword_wins() {
         let combos = [combo("ig", Matching::Loose), combo("sig", Matching::Loose)];
-        assert_eq!(typed("sig").find_match(&combos).unwrap().keyword, "sig");
+        assert_eq!(
+            typed("sig")
+                .find_match(&combos, Trigger::Immediate)
+                .unwrap()
+                .keyword,
+            "sig"
+        );
+    }
+
+    #[test]
+    fn only_combos_with_the_asked_trigger_match() {
+        let mut delimited = combo("sig", Matching::Strict);
+        delimited.trigger = Trigger::Delimiter;
+        let combos = [delimited];
+        assert!(
+            typed("sig")
+                .find_match(&combos, Trigger::Immediate)
+                .is_none()
+        );
+        assert!(
+            typed("sig")
+                .find_match(&combos, Trigger::Delimiter)
+                .is_some()
+        );
     }
 
     #[test]
@@ -131,7 +191,7 @@ mod tests {
         text.backspace();
         text.push("r");
         let combos = [combo("blåbær", Matching::Strict)];
-        assert!(text.find_match(&combos).is_some());
+        assert!(text.find_match(&combos, Trigger::Immediate).is_some());
     }
 
     #[test]

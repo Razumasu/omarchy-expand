@@ -18,6 +18,8 @@ package-repository release, or prebuilt binary.
 ## What it does
 
 - Expands typed keywords into plain text, including Unicode and multiple lines.
+- Expands a keyword immediately or, per combo, only once a space or punctuation
+  mark follows it, so a short keyword can still be typed inside a longer word.
 - Provides a terminal UI for creating, editing, searching, and grouping snippets.
 - Lets you enable or disable individual snippets or whole groups.
 - Supports strict or loose matching and optional case-insensitive matching.
@@ -36,6 +38,8 @@ There are three parts:
    translates them using the main keyboard layout reported by Hyprland. When
    a keyword matches, it waits for held keys to be released, erases the keyword
    with a virtual keyboard, and pastes the snippet through the Wayland clipboard.
+   Anything typed before the keyboard was clean is erased and re-added after the
+   snippet, so fast typing never leaves a half-erased keyword behind.
 3. **Picker:** `omarchy-expand pick` opens an Omarchy menu. Selecting a snippet
    asks the running daemon to paste it into the app underneath the menu.
 
@@ -51,7 +55,7 @@ account system, or telemetry. Building from source downloads Rust dependencies.
 ### Requirements
 
 - Omarchy with its Hyprland session, systemd user services, and menu/TUI helpers.
-- Rust and Cargo **1.98 or newer**, a C linker, `libxkbcommon`, and `wl-clipboard`.
+- Rust and Cargo **1.88 or newer**, a C linker, `libxkbcommon`, and `wl-clipboard`.
 - Permission to read input devices and create a virtual keyboard through `/dev/uinput`.
 
 The initial smoke test passed on Omarchy 4.0.4, Hyprland 0.56.2, and a Danish
@@ -129,6 +133,13 @@ the keyword. **Loose** matching allows the keyword at the end of a longer run.
 Whitespace, navigation keys, shortcuts, mouse clicks, and window focus changes
 break the current run. Keywords cannot contain whitespace.
 
+**Expand immediately**, the default, replaces the keyword the moment it has been
+typed, so a strict `sig` also fires while you type `signal`. **Expand after a
+delimiter** waits until a space or punctuation mark follows the keyword, keeps
+that character after the snippet, and leaves `signal` alone. Enter and Tab do
+not count as delimiters, because the app may act on them before the snippet
+could replace the keyword.
+
 | Key | Action |
 | --- | --- |
 | Tab / left / right | Switch between groups and combos |
@@ -168,8 +179,9 @@ Enter. The picker pastes the snippet without requiring its keyword to be typed.
 
 The editor saves `combos.json` and optional `settings.json` in
 `~/.config/omarchy-expand/` (or `$XDG_CONFIG_HOME/omarchy-expand/` when set).
-These are plain-text files. Back them up before testing updates and avoid storing
-passwords or other secrets as snippets.
+These are plain-text files, created readable by your user only, and each carries
+a `version` field so later releases can migrate them. Back them up before testing
+updates and avoid storing passwords or other secrets as snippets.
 
 Current limitations to be aware of:
 
@@ -177,14 +189,20 @@ Current limitations to be aware of:
   clipboard content is not restored after an expansion.
 - Pasting depends on the focused app accepting its expected paste shortcut.
   Some applications or slow clipboard consumers may behave differently.
-- The keymap is read when the daemon starts. Restart the service after changing
-  layouts. IME/composed-text input and unusual keyboard setups need more testing.
+- Switching between the layouts configured in Hyprland is followed live. Changing
+  the layout configuration itself (`input:kb_layout` and friends) still needs a
+  service restart, because the paste shortcut is chosen when the daemon starts.
+  IME/composed-text input and unusual keyboard setups need more testing.
+- When no window has focus, for example while a launcher, a menu, or the lock
+  screen holds the keyboard, nothing is recorded or expanded. A window that
+  reports no class is treated the same way.
 - The matching buffer is limited to 128 characters. Keep keywords short.
-- The default exclusions cover 1Password, Bitwarden, and KeePassXC by app class
-  or process name. The daemon does not identify password fields inside browsers
-  or other apps. Exclusions are editable in the setup UI.
+- The default exclusions cover 1Password, Bitwarden (including its Flatpak), and
+  KeePassXC by app class or process name. The daemon does not identify password
+  fields inside browsers or other apps. Exclusions are editable in the setup UI.
 - Explicit picker selections bypass app exclusions. Automatic expansions check
-  Hyprland's session-lock state; do not treat this beta as a security boundary.
+  Hyprland's session-lock state, and stop if Hyprland ever stops reporting it;
+  do not treat this beta as a security boundary.
 
 ## Troubleshooting, updates, and removal
 
@@ -198,7 +216,9 @@ systemctl --user restart omarchy-expand
 
 If the installer reports missing permissions, check `id -nG` and
 `ls -l /dev/uinput`. Joining the group in a new terminal alone does not update
-an already-running systemd user manager; reboot and try again.
+an already-running systemd user manager; reboot and try again. If `/dev/uinput`
+does not exist, the `uinput` kernel module is not loaded; the installer prints
+the `modprobe` and `modules-load.d` commands that fix it.
 
 For a later beta, back up `~/.config/omarchy-expand/`, fetch its tag in your clone,
 and install it:
