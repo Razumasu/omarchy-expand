@@ -1,8 +1,13 @@
 [package]
 name = "omarchy-expand"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2024"
 rust-version = "1.98"
+license = "MIT"
+description = "A text expander for Omarchy with a terminal setup UI and snippet picker"
+repository = "https://github.com/Razumasu/omarchy-expand"
+readme = "README.md"
+publish = false
 
 [dependencies]
 evdev = "0.13.2"

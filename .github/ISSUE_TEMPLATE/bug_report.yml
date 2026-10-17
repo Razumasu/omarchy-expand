@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a problem while testing the Omarchy beta.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing the beta. Search existing issues first and use harmless example snippets.
+        Remove personal information from logs. Do not attach raw keyboard-event recordings.
+  - type: input
+    id: version
+    attributes:
+      label: Beta tag or commit
+      placeholder: v0.1.0-beta.1
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Omarchy version, Hyprland version, keyboard layout, and the affected application.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include a harmless example keyword and snippet, and whether you used automatic expansion or the picker.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs (optional)
+      description: Review journalctl --user -u omarchy-expand -n 50 --no-pager for relevant messages and redact personal information.
+      render: text
