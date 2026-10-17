@@ -58,7 +58,11 @@ fn menu_option(combo: &ComboEntry) -> String {
     } else {
         format!("{} · {preview}", combo.name)
     };
-    format!("{GLYPH}\t{}\t{}", combo.keyword, subtext.replace('\t', " "))
+    format!(
+        "{GLYPH}\t{}\t{}",
+        combo.keyword,
+        subtext.replace(['\t', '\n', '\r'], " ")
+    )
 }
 
 /// The menu answers `keyword<TAB>subtext`; keywords are unique, so they are the key.
@@ -86,7 +90,7 @@ fn notify(headline: &str, description: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::Matching;
+    use crate::typed::{Matching, Trigger};
 
     fn combo(name: &str, keyword: &str, snippet: &str) -> ComboEntry {
         ComboEntry {
@@ -94,6 +98,7 @@ mod tests {
             keyword: keyword.into(),
             snippet: snippet.into(),
             matching: Matching::Strict,
+            trigger: Trigger::Immediate,
             case_sensitive: true,
             enabled: true,
         }

@@ -26,16 +26,21 @@ to behave. Explain how it fits a small, local text expander for Omarchy.
 
 ## Development
 
-Fork the repository and create a branch for your change. Rust/Cargo 1.98 or newer
+Fork the repository and create a branch for your change. Rust/Cargo 1.88 or newer
 and a C linker are needed to build; see the README for runtime dependencies.
 
 ```bash
-cargo build --locked
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+shellcheck install.sh test/*.sh
 git diff --check
 ```
 
-The unit tests do not need a live Hyprland session or keyboard-device access.
+The same checks, plus a build on Rust 1.88, run in GitHub Actions on every pull
+request. The unit tests do not need a live Hyprland session or keyboard-device
+access, but they do compile real xkb keymaps, so `libxkbcommon` and the xkb data
+files (`xkeyboard-config`) must be installed.
 Keep dependency changes intentional and include `Cargo.lock` when they change.
 Apply formatting consistently with nearby code and keep PRs focused.
 

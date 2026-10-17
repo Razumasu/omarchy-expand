@@ -4,7 +4,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::text_input::TextInput;
 use crate::config::{ComboEntry, Settings};
-use crate::typed::Matching;
+use crate::typed::{Matching, Trigger};
 
 pub enum Outcome {
     Continue,
@@ -19,16 +19,18 @@ pub enum ComboField {
     Snippet,
     Group,
     Matching,
+    Trigger,
     CaseSensitive,
     Enabled,
 }
 
-const COMBO_FIELDS: [ComboField; 7] = [
+const COMBO_FIELDS: [ComboField; 8] = [
     ComboField::Keyword,
     ComboField::Name,
     ComboField::Snippet,
     ComboField::Group,
     ComboField::Matching,
+    ComboField::Trigger,
     ComboField::CaseSensitive,
     ComboField::Enabled,
 ];
@@ -41,6 +43,7 @@ pub struct ComboForm {
     pub snippet: TextInput,
     pub group: usize,
     pub matching: Matching,
+    pub trigger: Trigger,
     pub case_sensitive: bool,
     pub enabled: bool,
     pub field: ComboField,
@@ -56,6 +59,7 @@ impl ComboForm {
             snippet: TextInput::multiline(""),
             group,
             matching: Matching::Strict,
+            trigger: Trigger::Immediate,
             case_sensitive: true,
             enabled: true,
             field: ComboField::Keyword,
@@ -71,6 +75,7 @@ impl ComboForm {
             snippet: TextInput::multiline(&combo.snippet),
             group,
             matching: combo.matching,
+            trigger: combo.trigger,
             case_sensitive: combo.case_sensitive,
             enabled: combo.enabled,
             field: ComboField::Keyword,
@@ -85,6 +90,7 @@ impl ComboForm {
             keyword: self.keyword.text(),
             snippet: self.snippet.text(),
             matching: self.matching,
+            trigger: self.trigger,
             case_sensitive: self.case_sensitive,
             enabled: self.enabled,
         };
@@ -110,6 +116,8 @@ impl ComboForm {
             (_, KeyCode::Enter) => return Outcome::Submit,
             (_, KeyCode::Up) => self.move_field(-1),
             (_, KeyCode::Down) => self.move_field(1),
+            // Whitespace ends a keyword while typing, so it cannot be part of one.
+            (ComboField::Keyword, KeyCode::Char(character)) if character.is_whitespace() => {}
             (ComboField::Keyword, _) => {
                 self.keyword.handle_key(key);
             }
@@ -126,6 +134,12 @@ impl ComboForm {
                 self.matching = match self.matching {
                     Matching::Strict => Matching::Loose,
                     Matching::Loose => Matching::Strict,
+                };
+            }
+            (ComboField::Trigger, KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')) => {
+                self.trigger = match self.trigger {
+                    Trigger::Immediate => Trigger::Delimiter,
+                    Trigger::Delimiter => Trigger::Immediate,
                 };
             }
             (ComboField::CaseSensitive, KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')) => {
@@ -218,6 +232,7 @@ impl SettingsForm {
                 .filter(|app| !app.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            ..Settings::default()
         }
     }
 

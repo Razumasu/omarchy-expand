@@ -2,6 +2,10 @@
 Description=omarchy-expand text expander
 PartOf=graphical-session.target
 After=graphical-session.target
+# Hyprland can answer late at login. The daemon waits for it, and these keep a few early
+# failures from parking the service as failed until the next login.
+StartLimitIntervalSec=120
+StartLimitBurst=10
 
 [Service]
 ExecStart=/usr/bin/omarchy-expand daemon

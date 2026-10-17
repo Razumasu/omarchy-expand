@@ -7,7 +7,7 @@ use std::ptr;
 use xkbcommon_dl::{
     XKB_MOD_NAME_ALT, XKB_MOD_NAME_CTRL, XKB_MOD_NAME_LOGO, xkb_context, xkb_context_flags,
     xkb_key_direction, xkb_keymap, xkb_keymap_compile_flags, xkb_rule_names, xkb_state,
-    xkb_state_component, xkbcommon_handle,
+    xkb_state_component, xkbcommon_handle, xkbcommon_option,
 };
 
 /// evdev numbers keys from 0, xkb from 8 (an X11 legacy).
@@ -33,7 +33,9 @@ pub struct Keyboard {
 
 impl Keyboard {
     pub fn new(names: &KeymapNames) -> Result<Self, String> {
-        let xkb = xkbcommon_handle();
+        // Checked once here; the handle used everywhere else would panic instead.
+        let xkb = xkbcommon_option()
+            .ok_or("libxkbcommon could not be loaded; install the libxkbcommon package")?;
         let rules = optional_cstring(&names.rules)?;
         let model = optional_cstring(&names.model)?;
         let layout = optional_cstring(&names.layout)?;

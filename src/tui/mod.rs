@@ -8,7 +8,6 @@ mod view;
 use std::error::Error;
 use std::io::stdout;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
@@ -27,22 +26,18 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     // Refuse to start on a broken file rather than overwrite it on the first save.
     let library = config::load_library(&dir)?;
     let settings = config::load_settings(&dir)?;
-    let mut app = App::new(dir, library, settings, daemon_running());
+    // Asked over the daemon's socket, so a daemon run outside systemd counts too.
+    let mut app = App::new(dir, library, settings, crate::ipc::daemon_reachable());
 
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableBracketedPaste)?;
     let result = app.run(&mut terminal);
-    execute!(stdout(), DisableBracketedPaste)?;
+    // The terminal is restored whatever happened, before any error is reported.
+    let paste = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
-    result
-}
-
-fn daemon_running() -> bool {
-    Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "omarchy-expand"])
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    result?;
+    paste?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -451,17 +446,27 @@ fn new_group(name: &str) -> Group {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typed::Matching;
+    use crate::typed::{Matching, Trigger};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyModifiers;
     use std::fs;
 
-    fn app(name: &str) -> App {
+    /// Removes the test's config directory when the test ends.
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn app(name: &str) -> (App, TempDir) {
         let dir =
             std::env::temp_dir().join(format!("omarchy-expand-tui-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        App::new(dir, Library::default(), Settings::default(), true)
+        let app = App::new(dir.clone(), Library::default(), Settings::default(), true);
+        (app, TempDir(dir))
     }
 
     fn press(app: &mut App, code: KeyCode) {
@@ -508,7 +513,7 @@ mod tests {
 
     #[test]
     fn the_first_combo_creates_a_group_and_is_saved() {
-        let mut app = app("first");
+        let (mut app, _dir) = app("first");
         add_combo(&mut app, "@@mail", "razu@example.com\nRoyal Arena");
         assert!(matches!(app.mode, Mode::Browse));
         let library = saved(&app);
@@ -522,7 +527,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_keyword_keeps_the_form_open_and_saves_nothing() {
-        let mut app = app("duplicate");
+        let (mut app, _dir) = app("duplicate");
         add_combo(&mut app, "sig", "One");
         add_combo(&mut app, "sig", "Two");
         let Mode::Combo(form) = &app.mode else {
@@ -534,7 +539,7 @@ mod tests {
 
     #[test]
     fn editing_changes_options_and_keeps_position() {
-        let mut app = app("edit");
+        let (mut app, _dir) = app("edit");
         add_combo(&mut app, "a", "A");
         add_combo(&mut app, "b", "B");
         press(&mut app, KeyCode::Up);
@@ -551,8 +556,34 @@ mod tests {
     }
 
     #[test]
+    fn the_trigger_can_be_switched_to_a_delimiter() {
+        let (mut app, _dir) = app("trigger");
+        add_combo(&mut app, "sig", "Regards");
+        press(&mut app, KeyCode::Char('e'));
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Tab);
+        }
+        press(&mut app, KeyCode::Right); // expand: immediately -> after a delimiter
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(saved(&app).groups[0].combos[0].trigger, Trigger::Delimiter);
+        let preview = screen(&app, 100, 30);
+        assert!(preview.contains("after a delimiter"), "{preview}");
+    }
+
+    #[test]
+    fn whitespace_cannot_be_typed_into_a_keyword() {
+        let (mut app, _dir) = app("keyword-space");
+        press(&mut app, KeyCode::Char('a'));
+        type_text(&mut app, "a b");
+        let Mode::Combo(form) = &app.mode else {
+            panic!("form should be open")
+        };
+        assert_eq!(form.keyword.text(), "ab");
+    }
+
+    #[test]
     fn toggling_and_deleting_are_saved() {
-        let mut app = app("toggle");
+        let (mut app, _dir) = app("toggle");
         add_combo(&mut app, "a", "A");
         press(&mut app, KeyCode::Char(' '));
         assert!(!saved(&app).groups[0].combos[0].enabled);
@@ -567,7 +598,7 @@ mod tests {
 
     #[test]
     fn groups_can_be_added_and_combos_moved_between_them() {
-        let mut app = app("groups");
+        let (mut app, _dir) = app("groups");
         add_combo(&mut app, "a", "A");
         press(&mut app, KeyCode::Left);
         press(&mut app, KeyCode::Char('a'));
@@ -590,7 +621,7 @@ mod tests {
 
     #[test]
     fn search_finds_combos_in_every_group() {
-        let mut app = app("search");
+        let (mut app, _dir) = app("search");
         add_combo(&mut app, "mail", "razu@example.com");
         press(&mut app, KeyCode::Left);
         press(&mut app, KeyCode::Char('a'));
@@ -609,7 +640,7 @@ mod tests {
 
     #[test]
     fn excluded_apps_are_edited_one_per_line() {
-        let mut app = app("settings");
+        let (mut app, _dir) = app("settings");
         press(&mut app, KeyCode::Char('s'));
         press(&mut app, KeyCode::Enter);
         type_text(&mut app, "  Slack ");
@@ -624,7 +655,7 @@ mod tests {
 
     #[test]
     fn the_screen_shows_combos_snippet_and_keys() {
-        let mut app = app("render");
+        let (mut app, _dir) = app("render");
         add_combo(&mut app, "@@mail", "razu@example.com");
         let browse = screen(&app, 100, 30);
         assert!(browse.contains("General"), "{browse}");
@@ -644,7 +675,7 @@ mod tests {
 
     #[test]
     fn tiny_terminals_do_not_break_drawing() {
-        let mut app = app("tiny");
+        let (mut app, _dir) = app("tiny");
         add_combo(&mut app, "a", "A");
         for (width, height) in [(20, 5), (1, 1), (60, 12)] {
             screen(&app, width, height);

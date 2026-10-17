@@ -12,7 +12,7 @@ use ratatui::widgets::{
 use super::form::{ComboField, ComboForm, GroupForm, SettingsForm};
 use super::text_input::TextInput;
 use super::{App, DeleteTarget, Mode, Pane};
-use crate::typed::Matching;
+use crate::typed::{Matching, Trigger};
 
 const ACCENT: Color = Color::Blue;
 const MUTED: Color = Color::DarkGray;
@@ -224,6 +224,9 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
         if combo.matching == Matching::Loose {
             title.push_str("· loose ");
         }
+        if combo.trigger == Trigger::Delimiter {
+            title.push_str("· after a delimiter ");
+        }
         if !combo.case_sensitive {
             title.push_str("· ignores case ");
         }
@@ -361,7 +364,7 @@ fn draw_combo_form(frame: &mut Frame, area: Rect, app: &App, form: &ComboForm) {
     } else {
         "New combo"
     };
-    let inner = popup(frame, area, 76, 22, title);
+    let inner = popup(frame, area, 76, 23, title);
     let [
         keyword,
         name,
@@ -369,6 +372,7 @@ fn draw_combo_form(frame: &mut Frame, area: Rect, app: &App, form: &ComboForm) {
         snippet,
         group,
         matching,
+        trigger,
         case,
         enabled,
         footer,
@@ -377,6 +381,7 @@ fn draw_combo_form(frame: &mut Frame, area: Rect, app: &App, form: &ComboForm) {
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -442,6 +447,22 @@ fn draw_combo_form(frame: &mut Frame, area: Rect, app: &App, form: &ComboForm) {
             explanation.fg(MUTED),
         ]),
         focus(ComboField::Matching),
+    );
+    let (when, when_explanation) = match form.trigger {
+        Trigger::Immediate => ("immediately", "  as soon as the keyword is typed"),
+        Trigger::Delimiter => ("after a delimiter", "  once a space or punctuation follows"),
+    };
+    draw_choice_row(
+        frame,
+        trigger,
+        "Expand",
+        Line::from(vec![
+            "‹ ".fg(ACCENT),
+            Span::raw(when),
+            " ›".fg(ACCENT),
+            when_explanation.fg(MUTED),
+        ]),
+        focus(ComboField::Trigger),
     );
     draw_choice_row(
         frame,

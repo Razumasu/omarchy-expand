@@ -7,6 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+if [[ $EUID -eq 0 ]]; then
+  echo "Run install.sh as your regular user, not as root: it installs into your home directory."
+  exit 1
+fi
+
 bin_dir="$HOME/.local/bin"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 unit="omarchy-expand.service"
@@ -15,17 +20,30 @@ desktop_file="${XDG_DATA_HOME:-$HOME/.local/share}/applications/omarchy-expand.d
 # The daemon reads keyboards and creates a virtual one, which needs the input group.
 # Groups are fixed when a process starts, so the user's systemd manager must have it too.
 check_permissions() {
-  local input_gid manager_pid
-  input_gid=$(getent group input | cut -d: -f3)
+  local user input_gid manager_pid
+  user=$(id -un)
 
-  if ! id -nG "$USER" | grep -qw input || [[ $(stat -c %G /dev/uinput) != "input" ]]; then
+  if [[ ! -e /dev/uinput ]]; then
+    echo "/dev/uinput does not exist, so the uinput kernel module is not loaded. Run these once:"
+    echo "  sudo modprobe uinput"
+    echo "  echo uinput | sudo tee /etc/modules-load.d/omarchy-expand.conf"
+    echo "then run ./install.sh again."
+    exit 1
+  fi
+
+  if ! id -nG | grep -qw input || [[ $(stat -c %G /dev/uinput) != "input" ]]; then
     echo "omarchy-expand needs keyboard access. Run these once, then reboot:"
-    echo "  sudo usermod -aG input $USER"
+    echo "  sudo usermod -aG input $user"
     echo "  echo 'KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\", OPTIONS+=\"static_node=uinput\"' | sudo tee /etc/udev/rules.d/60-omarchy-expand-uinput.rules"
     exit 1
   fi
 
-  manager_pid=$(pgrep -u "$USER" -x systemd | head -1)
+  input_gid=$(getent group input | cut -d: -f3)
+  manager_pid=$(pgrep -u "$(id -u)" -x systemd | head -1 || true)
+  if [[ -z $manager_pid ]]; then
+    echo "No systemd user manager is running for $user. Log in to a graphical session and run ./install.sh there."
+    exit 1
+  fi
   if ! grep -E '^Groups:' "/proc/$manager_pid/status" | grep -qw "$input_gid"; then
     echo "You are in the input group, but this session started before you joined it."
     echo "Log out and back in (or reboot), then run ./install.sh again."
