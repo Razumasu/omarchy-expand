@@ -23,7 +23,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: shellcheck install.sh test/*.sh
+      - run: shellcheck -x install.sh scripts/*.sh test/*.sh
+      - run: bash test/installer.sh
 
   msrv:
     name: Build on the minimum Rust

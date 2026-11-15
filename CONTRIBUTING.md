@@ -33,9 +33,13 @@ and a C linker are needed to build; see the README for runtime dependencies.
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-shellcheck install.sh test/*.sh
+shellcheck -x install.sh scripts/*.sh test/*.sh
+bash test/installer.sh
 git diff --check
 ```
+
+The installer tests use temporary files and fake privilege, device, and service
+commands. They need no administrator access and do not change your installation.
 
 The same checks, plus a build on Rust 1.88, run in GitHub Actions on every pull
 request. The unit tests do not need a live Hyprland session or keyboard-device
