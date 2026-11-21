@@ -70,45 +70,51 @@ omarchy pkg add git rust gcc wl-clipboard libxkbcommon
 ### 1. Get the source
 
 ```bash
-git clone --branch v0.1.0-beta.1 --depth 1 https://github.com/Razumasu/omarchy-expand.git
+git clone --depth 1 https://github.com/Razumasu/omarchy-expand.git
 cd omarchy-expand
 ```
 
-Use a tagged beta from [Releases](https://github.com/Razumasu/omarchy-expand/releases)
-for a reproducible test. The `main` branch may contain changes after the tagged beta.
+These instructions follow `main`. The older `v0.1.0-beta.1` tag predates the
+integrated keyboard setup below; use `main` until a newer tagged beta is published
+in [Releases](https://github.com/Razumasu/omarchy-expand/releases).
 
-### 2. Set up keyboard access
+### 2. Install
 
-The app reads keyboard events to recognize keywords and uses a virtual keyboard
-to insert expansions. The `input` group provides this access. Membership also
-allows other programs running as your account to read input events; this is a
-meaningful system permission.
-
-Run these once on a normal Omarchy installation:
-
-```bash
-sudo usermod -aG input "$USER"
-printf '%s\n' 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
-  | sudo tee /etc/udev/rules.d/60-omarchy-expand-uinput.rules
-```
-
-**Reboot before continuing** so the device rule and your systemd user manager both
-have the new permissions. Save any open work first. If that rule file already
-exists with custom content, review it before replacing it.
-
-### 3. Build and install
-
-Return to the cloned `omarchy-expand` directory in your graphical session:
+Run the installer as your regular user in your Omarchy graphical session:
 
 ```bash
 ./install.sh
+```
+
+The installer builds the app, asks for keyboard access when needed, and requests
+administrator authentication for that setup only. Accepting adds your account to
+the `input` group, loads `uinput` now and at boot, and installs its device rule.
+This allows other programs running as your account to read keyboard events too.
+Existing custom rule or module-file content is preserved; the installer stops
+with the file path if it needs review.
+
+The binary is installed to `~/.local/bin/omarchy-expand`, **Text Expander** is added
+to the app launcher, and the systemd user service is enabled automatically.
+If your current session already has keyboard access, the service starts at once.
+
+On a first installation, expect **REBOOT REQUIRED**: save your work and reboot
+when ready. The service starts at your next graphical login. **There is no need
+to run the installer again.** Until then, the editor is available but automatic
+text expansion is inactive and the editor reports that the daemon is not running.
+
+For scripted installation, `./install.sh --accept-keyboard-access` explicitly
+approves the same permissions. Administrator authentication is still required
+when setup is needed; without a terminal it uses the desktop authentication dialog.
+
+### 3. Open and check
+
+Press **Super+Space**, search for **Text Expander**, and open it. You can also check:
+
+```bash
 systemctl --user status omarchy-expand --no-pager
 ```
 
-Run the installer as your regular user. It builds the binary, installs it to
-`~/.local/bin/omarchy-expand`, enables and starts the user service, and adds
-**Text Expander** to your app launcher. Snippets are added separately; a fresh
-installation starts with an empty library.
+Snippets are added separately; a fresh installation starts with an empty library.
 
 ## Try your first expansion
 
@@ -214,11 +220,13 @@ journalctl --user -u omarchy-expand -n 50 --no-pager
 systemctl --user restart omarchy-expand
 ```
 
-If the installer reports missing permissions, check `id -nG` and
-`ls -l /dev/uinput`. Joining the group in a new terminal alone does not update
-an already-running systemd user manager; reboot and try again. If `/dev/uinput`
-does not exist, the `uinput` kernel module is not loaded; the installer prints
-the `modprobe` and `modules-load.d` commands that fix it.
+If the editor reports that the daemon is not running, finish any reboot requested
+by the installer first. Joining the group in a new terminal alone does not update
+an already-running systemd user manager. If setup was cancelled, or you installed
+an older beta manually, run the current `./install.sh` and accept keyboard access.
+It also repairs a missing `uinput` module or device rule. Check `id -nG` and
+`ls -l /dev/uinput` if access still fails after rebooting; startup failures are
+reported with the service status and recent logs instead of a success message.
 
 For a later beta, back up `~/.config/omarchy-expand/`, fetch its tag in your clone,
 and install it:
@@ -236,9 +244,9 @@ To remove the app, run this from your clone:
 ```
 
 Removal keeps your snippet configuration. Remove an optional picker keybinding
-separately. The installer also leaves the `input` group membership and uinput
-rule in place; review whether other software needs them before removing those
-permissions.
+separately. The installer also leaves the `input` group membership, uinput device
+rule, and `/etc/modules-load.d/omarchy-expand.conf` in place; review whether other
+software needs them before removing those permissions.
 
 ## Bugs, ideas, and contributions
 
